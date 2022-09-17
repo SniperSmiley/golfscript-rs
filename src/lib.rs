@@ -32,15 +32,13 @@ use crate::unescape::unescape;
 use crate::util::{repeat, set_and, set_or, set_subtract, set_xor};
 use crate::value::Gval;
 
-fn print(bytes: &[u8]) {
-    std::io::stdout().write_all(bytes).unwrap();
-}
-
 struct Gs {
     pub stack: Vec<Gval>,
     vars: HashMap<Vec<u8>, Gval>,
     lb: Vec<usize>,
     rng_state: u64,
+    stable: bool,
+    output: String,
 }
 
 impl Gs {
@@ -50,9 +48,16 @@ impl Gs {
             vars: HashMap::new(),
             lb: vec![],
             rng_state: 123456789u64,
+            stable: true,
+            output: String::new(),
         }
     }
 
+    pub fn print(&mut self,bytes: &[u8]) {
+        self.output += &String::from_utf8_lossy(bytes);
+    }
+
+    //run is still volitile
     pub fn run(&mut self, code: &[u8]) {
         let (rest, tokens) = parse_code(code).expect("parse error");
         if rest.len() > 0 {
@@ -64,7 +69,7 @@ impl Gs {
             match token {
                 Gtoken::Symbol(b":") => {
                     let name = tokens.next().expect("parse error: assignment");
-                    let t = self.top().clone();
+                    let t = self.top().unwrap().clone();
                     self.vars.insert(name.lexeme().to_owned(), t);
                 }
                 t => {
@@ -78,17 +83,26 @@ impl Gs {
         self.stack.push(val)
     }
 
-    fn top(&self) -> &Gval {
-        self.stack.last().expect("stack underflow")
+    fn top(&self) -> Option<&Gval> {
+        if let Some(a) = self.stack.last() {
+            Some(a)
+        } else {
+            self.stable = false;
+            None
+        }
     }
 
     fn dup(&mut self) {
-        let a = self.pop();
-        self.push(a.clone());
-        self.push(a);
+        if let Some(a) = self.pop() {
+            self.push(a.clone());
+            self.push(a);
+        } else {
+            self.push(Gval::Arr(Vec::<Gval>::new()))
+            self.push(Gval::Arr(Vec::<Gval>::new()))
+        }
     }
 
-    fn pop(&mut self) -> Gval {
+    fn pop(&mut self) -> Option<Gval> {
         let mut i = self.lb.len();
         while i > 0 && self.lb[i - 1] >= self.stack.len() {
             i -= 1;
@@ -96,40 +110,67 @@ impl Gs {
                 self.lb[i] -= 1;
             }
         }
-        self.stack.pop().expect("stack underflow")
+        if let Some(a) = self.stack.pop() {
+            Some(a)
+        } else {
+            self.stable = false;
+            None
+        }
     }
 
     fn tilde(&mut self) {
         match self.pop() {
-            Gval::Int(n) => self.push(Gval::Int(!n)),
-            Gval::Arr(vs) => self.stack.extend(vs),
-            Gval::Str(bs) => self.run(&bs),
-            Gval::Blk(bs) => self.run(&bs),
+            Some(Gval::Int(n)) => self.push(Gval::Int(!n)),
+            Some(Gval::Arr(vs)) => self.stack.extend(vs),
+            Some(Gval::Str(bs)) => self.run(&bs),
+            Some(Gval::Blk(bs)) => self.run(&bs),
+            None => self.push(Gval::Arr(Vec::<Gval>::new())),
         }
     }
 
     fn backtick(&mut self) {
-        let bs = self.pop().inspect();
-        self.push(Gval::Str(bs));
+        if let Some(bs) = self.pop() {
+            self.push(Gval::Str(bs.inspect()));
+        } else {
+            self.push(Gval::Str(Vec::<Gval>::new()));
+        }
     }
 
     fn bang(&mut self) {
-        let f = self.pop().falsey();
-        self.push(Gval::bool(f));
+        if let Some(f) = self.pop() {
+            self.push(Gval::bool(f.falsey()));
+        } else {
+            self.push(Gval::bool(true));
+        }
     }
 
     fn at_sign(&mut self) {
-        let c = self.pop();
-        let b = self.pop();
-        let a = self.pop();
-        self.push(b);
-        self.push(c);
-        self.push(a);
+        if let Some(c) = self.pop() {
+            if let Some(b) = self.pop() {
+                if let Some(a) = self.pop() {
+                    self.push(b);
+                    self.push(c);
+                    self.push(a);
+                    return;
+                }
+                self.push(b);
+                self.push(c);
+                self.push(Gval::Arr(Vec::<Gval>::new()));
+                return;
+            }
+            Self.push(Gval::Arr(Vec::<Gval>::new()));
+            self.push(c);
+            self.push(Gval::Arr(Vec::<Gval>::new()));
+            return;
+        }
+        self.push(Gval::Arr(Vec::<Gval>::new()));
+        self.push(Gval::Arr(Vec::<Gval>::new()));
+        self.push(Gval::Arr(Vec::<Gval>::new()));
     }
 
     fn dollar(&mut self) {
         match self.pop() {
-            Gval::Int(n) => {
+            Some(Gval::Int(n)) => {
                 let len: BigInt = self.stack.len().into();
                 if n < (-1i32).into() {
                     if let Some(i) = (-n - 2i32).to_usize() {
@@ -143,29 +184,31 @@ impl Gs {
                     }
                 }
             }
-            Gval::Arr(mut vs) => {
+            Some(Gval::Arr(mut vs)) => {
                 vs.sort();
                 self.push(Gval::Arr(vs));
             }
-            Gval::Str(mut bs) => {
+            Some(Gval::Str(mut bs)) => {
                 bs.sort();
                 self.push(Gval::Str(bs));
             }
-            Gval::Blk(code) => match self.pop() {
-                Gval::Int(_) => panic!("can't sort an integer"),
-                Gval::Arr(vs) => {
+            Some(Gval::Blk(code)) => match self.pop() {
+                Some(Gval::Int(n)) => self.push(Gval::Int(n)),
+                Some(Gval::Arr(vs)) => {
                     let sorted = self.sort_by(code, vs);
                     self.push(Gval::Arr(sorted));
                 }
-                Gval::Str(vs) => {
+                Some(Gval::Str(vs)) => {
                     let sorted = self.sort_by(code, vs);
                     self.push(Gval::Str(sorted));
                 }
-                Gval::Blk(vs) => {
+                Some(Gval::Blk(vs)) => {
                     let sorted = self.sort_by(code, vs);
                     self.push(Gval::Blk(sorted));
                 }
+                None => self.push(Gval::Arr(Vec::<Gval>::new())),
             },
+            None => self.push(Gval::Arr(Vec::<Gval>::new())),
         }
     }
 
@@ -174,21 +217,22 @@ impl Gs {
         for v in vs {
             self.push(v.clone().into());
             self.run(&code);
-            results.push((self.pop(), v));
+            let a = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
+            results.push((a, v));
         }
         results.sort_by(|a, b| a.0.cmp(&b.0));
         results.into_iter().map(|x| x.1).collect()
     }
 
     fn plus(&mut self) {
-        let b = self.pop();
-        let a = self.pop();
+        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
         self.push(a.plus(b));
     }
 
     fn minus(&mut self) {
-        let b = self.pop();
-        let a = self.pop();
+        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
         match coerce(a, b) {
             Coerced::Ints(x, y) => self.push(Gval::Int(x - y)),
             Coerced::Arrs(x, y) => self.push(Gval::Arr(set_subtract(x, y))),
@@ -198,8 +242,8 @@ impl Gs {
     }
 
     fn asterisk(&mut self) {
-        let b = self.pop();
-        let a = self.pop();
+        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
         use Gval::*;
         match (a, b) {
             // multiply
@@ -231,8 +275,8 @@ impl Gs {
     }
 
     fn slash(&mut self) {
-        let b = self.pop();
-        let a = self.pop();
+        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
         use Gval::*;
         match (a, b) {
             // divide
@@ -269,27 +313,43 @@ impl Gs {
             (Blk(cond), Blk(step)) => {
                 let mut r = vec![];
                 loop {
-                    self.push(self.top().clone());
+                    if let Some(a) = self.top() {
+                        self.push(a.clone());
+                    } else {
+                        self.push(Gval::Arr(Vec::<Gval>::new()));
+                    }
                     self.run(&cond);
-                    if self.pop().falsey() {
+
+                    if let Some(f) = self.pop() {
+                        if  f.falsey() {
+                            break;
+                        }
+                    } else {
                         break;
                     }
-                    r.push(self.top().clone());
+
+                    if let Some(a) = self.top() {
+                        r.push(a.clone());
+                    } else {
+                        r.push(Gval::Arr(Vec::<Gval>::new()));
+                    }
+
                     self.run(&step);
                 }
                 self.pop();
                 self.push(Gval::Arr(r));
             }
 
-            (Blk(_), Int(_)) | (Int(_), Blk(_)) => {
-                panic!("int-block /")
+            (Blk(code), Int(n)) | (Int(n), Blk(code)) => {
+                let a = vec![Gval::Int(n)];
+                self.each(code, a)
             }
         }
     }
 
     fn percent(&mut self) {
-        let b = self.pop();
-        let a = self.pop();
+        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
         use Gval::*;
         match (a, b) {
             // modulo
@@ -323,13 +383,21 @@ impl Gs {
             (Int(n), Str(a)) | (Str(a), Int(n)) => self.push(Str(every_nth(a, n))),
 
             // unimplemented
-            (Int(_), Blk(_)) | (Blk(_), Int(_)) | (Blk(_), Blk(_)) => panic!("%"),
+            (Int(n), Blk(code)) | (Blk(code), Int(n)) => {
+                let mut r = vec![Gval::Int(n)];
+                r = self.gs_map(code, r);
+                self.push(Arr(r));
+            }
+            (Blk(codeA), Blk(codeB)) => {
+                let r = self.gs_map(codeB, vec![Gval::Blk(codeA)]);
+                self.push(Arr(r));
+            }
         }
     }
 
     fn vertical_bar(&mut self) {
-        let b = self.pop();
-        let a = self.pop();
+        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
         self.push(match coerce(a, b) {
             Coerced::Ints(x, y) => Gval::Int(x | y),
             Coerced::Arrs(x, y) => Gval::Arr(set_or(x, y)),
@@ -339,8 +407,8 @@ impl Gs {
     }
 
     fn ampersand(&mut self) {
-        let b = self.pop();
-        let a = self.pop();
+        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
         self.push(match coerce(a, b) {
             Coerced::Ints(x, y) => Gval::Int(x & y),
             Coerced::Arrs(x, y) => Gval::Arr(set_and(x, y)),
@@ -350,8 +418,8 @@ impl Gs {
     }
 
     fn caret(&mut self) {
-        let b = self.pop();
-        let a = self.pop();
+        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
         self.push(match coerce(a, b) {
             Coerced::Ints(x, y) => Gval::Int(x ^ y),
             Coerced::Arrs(x, y) => Gval::Arr(set_xor(x, y)),
@@ -361,8 +429,8 @@ impl Gs {
     }
 
     fn lteqgt(&mut self, ordering: Ordering) {
-        let b = self.pop();
-        let a = self.pop();
+        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
         use Gval::*;
         use Ordering::*;
         match (ordering, a, b) {
@@ -385,7 +453,7 @@ impl Gs {
     fn comma(&mut self) {
         use Gval::*;
         match self.pop() {
-            Int(n) => {
+            Some(Int(n)) => {
                 let mut r = vec![];
                 let mut i = BigInt::zero();
                 while i < n {
@@ -394,29 +462,35 @@ impl Gs {
                 }
                 self.push(Arr(r));
             }
-            Arr(a) => self.push(a.len().into()),
-            Str(a) => self.push(a.len().into()),
-            Blk(code) => match self.pop() {
-                Int(_) => panic!("select on integer"),
-                Arr(a) => {
+            Some(Arr(a)) => self.push(a.len().into()),
+            Some(Str(a)) => self.push(a.len().into()),
+            Some(Blk(code)) => match self.pop() {
+                Some(Int(n)) => {
+                    let a = vec![Int(n)];
+                    let r = self.select(code, a);
+                    self.push(Arr(r));
+                }
+                Some(Arr(a)) => {
                     let r = self.select(code, a);
                     self.push(Arr(r))
                 }
-                Str(a) => {
+                Some(Str(a)) => {
                     let r = self.select(code, a);
                     self.push(Str(r))
                 }
-                Blk(a) => {
+                Some(Blk(a)) => {
                     let r = self.select(code, a);
                     self.push(Blk(r))
                 }
+                None => self.push(Gval::Arr(Vec::<Gval>::new())),
             },
+            None => self.push(Arr(Vec::<Gval>::new())),
         }
     }
 
     fn question(&mut self) {
-        let b = self.pop();
-        let a = self.pop();
+        let b = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
+        let a = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
         use Gval::*;
         match (a, b) {
             // power
@@ -445,7 +519,7 @@ impl Gs {
             (Str(h), Str(n)) => self.push(Gval::Int(string_index(&h, &n))),
 
             // find
-            (Int(_), Blk(_)) | (Blk(_), Int(_)) => panic!(),
+            (Int(n), Blk(code)) | (Blk(code), Int(n)) => self.find(code, vec![Gval::Int(n)]),
             (Blk(code), Blk(a)) | (Blk(code), Str(a)) | (Str(a), Blk(code)) => self.find(code, a),
             (Blk(code), Arr(a)) | (Arr(a), Blk(code)) => self.find(code, a),
         }
@@ -454,18 +528,28 @@ impl Gs {
     fn left_paren(&mut self) {
         use Gval::*;
         match self.pop() {
-            Int(n) => self.push(Int(n - 1i32)),
-            Arr(a) => {
-                self.push(Arr(a[1..].to_vec()));
-                self.push(a[0].clone());
+            Some(Int(n)) => self.push(Int(n - 1i32)),
+            Some(Arr(a)) => {
+                if a.len() > 0 {
+                    self.push(Arr(a[1..].to_vec()));
+                    self.push(a[0].clone());
+                }
             }
-            Str(a) => {
-                self.push(Str(a[1..].to_vec()));
-                self.push(a[0].into());
+            Some(Str(a)) => {
+                if a.len() > 0 {
+                    self.push(Str(a[1..].to_vec()));
+                    self.push(a[0].into());
+                }
             }
-            Blk(a) => {
-                self.push(Blk(a[1..].to_vec()));
-                self.push(a[0].into());
+            Some(Blk(a)) => {
+                if a.len() > 0 {
+                    self.push(Blk(a[1..].to_vec()));
+                    self.push(a[0].into());
+                }
+            }
+            None => {
+                let n:BigInt = BigInt::zero();
+                self.push(Int(n - 1i32));
             }
         }
     }
@@ -473,21 +557,26 @@ impl Gs {
     fn right_paren(&mut self) {
         use Gval::*;
         match self.pop() {
-            Int(n) => self.push(Int(n + 1i32)),
-            Arr(mut a) => {
+            Some(Int(n)) => self.push(Int(n + 1i32)),
+            Some(Arr(mut a)) => {
+                // may cause a panic
                 let l = a.pop().unwrap();
                 self.push(Arr(a.to_vec()));
                 self.push(l);
             }
-            Str(mut a) => {
+            Some(Str(mut a)) => {
                 let l = a.pop().unwrap();
                 self.push(Str(a.to_vec()));
                 self.push(l.into());
             }
-            Blk(mut a) => {
+            Some(Blk(mut a)) => {
                 let l = a.pop().unwrap();
                 self.push(Blk(a.to_vec()));
                 self.push(l.into());
+            }
+            None => {
+                let n:BigInt = BigInt::zero();
+                self.push(Int(n + 1i32));
             }
         }
     }
@@ -501,36 +590,48 @@ impl Gs {
 
     fn rand(&mut self) {
         let r = match self.pop() {
-            Gval::Int(n) if n.is_positive() => self.rng() % n,
+            Some(Gval::Int(n)) if n.is_positive() => self.rng() % n,
             _ => BigInt::zero(),
         };
         self.push(Gval::Int(r));
     }
 
     fn do_loop(&mut self) {
-        let a = self.pop();
-        loop {
-            self.go(a.clone());
-            if self.pop().falsey() {
-                break;
+        if let Some(a) = self.pop() {
+            loop {
+                self.go(a.clone());
+                if let Some(f) = self.pop() {
+                    if f.falsey() {
+                        return;
+                    }
+                } else {
+                    return;
+                }
             }
         }
     }
 
     fn while_loop(&mut self, which: bool) {
-        let b = self.pop();
-        let a = self.pop();
+        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
         loop {
             self.go(a.clone());
-            if self.pop().falsey() == which {
-                break;
+            if let Some(f) = self.pop() {
+                if  f.falsey() == which {
+                    break;
+                }
+            } else {
+                if !which {
+                    break;
+                }
             }
             self.go(b.clone());
         }
     }
 
+    //could be volitile
     fn zip(&mut self) {
-        let a = self.pop().unwrap_arr();
+        let a = self.pop().unwrap().unwrap_arr();
         let mut r = vec![];
         let blank = a.first().map_or(Gval::Arr(vec![]), |x| x.factory());
         for row in a {
@@ -545,9 +646,10 @@ impl Gs {
     }
 
     fn base(&mut self) {
-        let b = self.pop().unwrap_int();
+        //Fix this so it doesn't crash on invalid input
+        let b = self.pop().unwrap().unwrap_int();
         match self.pop() {
-            Gval::Int(n) => {
+            Some(Gval::Int(n)) => {
                 let mut digits = vec![];
                 let mut i = n.abs();
                 while !i.is_zero() {
@@ -558,13 +660,14 @@ impl Gs {
                 digits.reverse();
                 self.push(Gval::Arr(digits))
             }
-            n => {
+            Some(n) => {
                 let mut total = BigInt::zero();
                 for digit in n.as_arr() {
                     total = total * b.clone() + digit.unwrap_int();
                 }
                 self.push(Gval::Int(total))
             }
+            _ => self.push(Gval::Int(BigInt::zero())),
         }
     }
 
@@ -600,8 +703,10 @@ impl Gs {
         for v in vs {
             self.push(v.clone().into());
             self.run(&code);
-            if self.pop().truthy() {
-                r.push(v)
+            if let Some(t) = self.pop() {
+                if t.truthy() {
+                    r.push(v);
+                }
             }
         }
         r
@@ -611,9 +716,11 @@ impl Gs {
         for v in vs {
             self.push(v.clone().into());
             self.run(&code);
-            if self.pop().truthy() {
-                self.push(v.into());
-                break;
+            if let Some(t) = self.pop() {
+                if t.truthy() {
+                    self.push(v.into());
+                    return;
+                }
             }
         }
     }
@@ -656,10 +763,14 @@ impl Gs {
                 self.push(Gval::Arr(vs));
             }
             Gtoken::Symbol(b"\\") => {
-                let b = self.pop();
-                let a = self.pop();
-                self.push(b);
-                self.push(a);
+                if let Some(b) = self.pop() {
+                    if let Some(a) = self.pop() {
+                        self.push(b);
+                        self.push(a);
+                    } else {
+                        self.push(b);
+                    }
+                }
             }
             Gtoken::Symbol(b";") => {
                 let _ = self.pop();
@@ -673,52 +784,75 @@ impl Gs {
             Gtoken::Symbol(b"(") => self.left_paren(),
             Gtoken::Symbol(b")") => self.right_paren(),
             Gtoken::Symbol(b"and") => {
-                let b = self.pop();
-                let a = self.pop();
-                self.go(if a.truthy() { b } else { a });
+                if let Some(b) = self.pop() {
+                    if let Some(a) = self.pop() {
+                        self.go(if a.truthy() { b } else { a });
+                    } else {
+                        self.go(b);
+                    }
+                } else {
+                    self.push(Gval::bool(false));
+                }
             }
             Gtoken::Symbol(b"or") => {
-                let b = self.pop();
-                let a = self.pop();
-                self.go(if a.falsey() { b } else { a });
+                if let Some(b) = self.pop() {
+                    if let Some(a) = self.pop() {
+                        self.go(if a.truthy() { a } else { b });
+                    } else {
+                        self.go(b);
+                    }
+                } else { 
+                    self.push(Gval::bool(false));
+                }
             }
             Gtoken::Symbol(b"xor") => {
-                let b = self.pop();
-                let a = self.pop();
-                self.push(Gval::bool(a.truthy() ^ b.truthy()));
+                let b = self.pop().or(Some(Gval::bool(false))).unwrap();
+                let a = self.pop().or(Some(Gval::bool(false))).unwrap();
+                // run a if a and not b run b if b and not a
+                self.go(if a.truthy() && b.falsey() { a } else { if a.falsy() && b.truthy() { b } else { Gval::bool(false) } });
             }
             Gtoken::Symbol(b"n") => self.push(Gval::Str(b"\n".to_vec())),
             Gtoken::Symbol(b"print") => {
-                let a = self.pop();
-                print(&a.to_gs());
+                if let Some(a) = self.pop() {
+                    self.print(&a.to_gs());
+                } else {
+                    self.print(b"");
+                }
             }
             Gtoken::Symbol(b"p") => {
-                let a = self.pop();
-                print(&a.inspect());
-                print(b"\n");
+                if let Some(a) = self.pop() {
+                    self.print(&a.inspect());
+                }
+                self.print(b"\n");
             }
             Gtoken::Symbol(b"puts") => {
-                let a = self.pop();
-                print(&a.to_gs());
-                print(b"\n");
+                if let Some(a) = self.pop() {
+                    self.print(&a.to_gs());
+                }
+                self.print(b"\n");
             }
             Gtoken::Symbol(b"rand") => self.rand(),
             Gtoken::Symbol(b"do") => self.do_loop(),
             Gtoken::Symbol(b"while") => self.while_loop(true),
             Gtoken::Symbol(b"until") => self.while_loop(false),
             Gtoken::Symbol(b"if") => {
-                let c = self.pop();
-                let b = self.pop();
-                let a = self.pop();
+                let c = self.pop().or(Some(Gval::bool(false))).unwrap();
+                let b = self.pop().or(Some(Gval::bool(false))).unwrap();
+                let a = self.pop().or(Some(Gval::bool(false))).unwrap();
                 if a.truthy() {
                     self.go(b);
                 } else {
                     self.go(c);
                 }
             }
+            //Pushes popped value back on stack if not int
             Gtoken::Symbol(b"abs") => {
-                let a = self.pop();
-                self.push(Gval::Int(a.unwrap_int().abs()));
+                let a = self.pop().or(Some(Gval::Int(BigInt::zero()))).unwrap();
+                if let Gval::Int(n) = a {
+                    self.push(Gval::Int(n.abs()));
+                } else {
+                    self.push(a);
+                }
             }
             Gtoken::Symbol(b"zip") => self.zip(),
             Gtoken::Symbol(b"base") => self.base(),
@@ -727,70 +861,26 @@ impl Gs {
             Gtoken::Comment(_) => {}
         }
     }
-}
 
-#[derive(clap::Parser, Debug)]
-struct Cli {
-    #[clap(long)]
-    code_path: Option<String>,
-    #[clap(short = 'e', long, allow_hyphen_values = true)]
-    code: Option<String>,
-    #[clap(long)]
-    input_path: Option<String>,
-    #[clap(short = 'i', long, allow_hyphen_values = true)]
-    input: Option<String>,
-    #[clap(short = 'q', long, takes_value = false)]
-    no_implicit_output: bool,
-    #[clap(short = 's', long, takes_value = false)]
-    input_from_stdin: bool,
-    #[clap(long, takes_value = false)]
-    args: bool,
-    args_vec: Vec<String>,
-}
-
-fn main() {
-    let cli = Cli::parse();
-    let mut gs = Gs::new();
-    let input = if cli.args {
-        Gval::Arr(
-            cli.args_vec
-                .iter()
-                .map(|x| Gval::Str(x.as_bytes().to_vec()))
-                .collect(),
-        )
-    } else if cli.input_from_stdin {
-        let mut bytes = vec![];
-        std::io::stdin().read_to_end(&mut bytes).unwrap();
-        Gval::Str(bytes)
-    } else if let Some(path) = cli.input_path {
-        Gval::Str(std::fs::read(path).unwrap())
-    } else if let Some(string) = cli.input {
-        Gval::Str(string.as_bytes().to_vec())
-    } else {
-        Gval::Str(vec![])
-    };
-    let code = if let Some(path) = cli.code_path {
-        std::fs::read(path).unwrap()
-    } else if let Some(code) = cli.code {
-        code.as_bytes().to_vec()
-    } else {
-        eprintln!(
-            r"No code provided. Try:
-
-    golfscript-rs --help
-    golfscript-rs --code '~{{.@\%.}}do;'   --input '140 150'
-    golfscript-rs --code 'n*~{{.@\%.}}do;' --args 140 150   # code.golf style
-    golfscript-rs --code-path file.gs    --input-file input.txt
-    golfscript-rs --code-path file.gs    --input-from-stdin
-"
-        );
-        std::process::exit(1)
-    };
-    gs.stack.push(input);
-    gs.run(&code);
-    if !cli.no_implicit_output {
-        gs.stack = vec![Gval::Arr(gs.stack)];
-        gs.run(b"puts");
+    pub fn stepped(&mut self, code: &[u8]) {
+        let (rest, tokens) = parse_code(code).expect("parse error");
+        if rest.len() > 0 {
+            panic!("parse error: has remainder")
+        }
+        // println!("parse: {:?}", tokens);
+        let mut tokens = tokens.into_iter();
+        while let Some(token) = tokens.next() {
+            match token {
+                Gtoken::Symbol(b":") => {
+                    let name = tokens.next().expect("parse error: assignment");
+                    let t = self.top().clone();
+                    self.vars.insert(name.lexeme().to_owned(), t);
+                }
+                t => {
+                    self.run_token(t);
+                }
+            }
+        }
     }
 }
 
@@ -831,7 +921,7 @@ impl Golfscript {
             selected_end: 0,
         }
     }
-    fn step(&mut self) {
+    /*fn step(&mut self) {
         self.gs.step(&self.source);
         self.selected += 1;
     }
@@ -847,5 +937,5 @@ impl Golfscript {
     fn run(&mut self) {
         self.gs.run(&self.source);
         self.selected = self.gs.stack.len() - 1;
-    }
+    }*/
 }
