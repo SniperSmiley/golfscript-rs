@@ -53,6 +53,10 @@ impl Gs {
         }
     }
 
+    pub fn set_unstable(&mut self) {
+        self.stable = false;
+    }
+
     pub fn print(&mut self,bytes: &[u8]) {
         self.output += &String::from_utf8_lossy(bytes);
     }
@@ -61,16 +65,19 @@ impl Gs {
     pub fn run(&mut self, code: &[u8]) {
         let (rest, tokens) = parse_code(code).expect("parse error");
         if rest.len() > 0 {
-            panic!("parse error: has remainder")
+            return;
         }
         // println!("parse: {:?}", tokens);
         let mut tokens = tokens.into_iter();
         while let Some(token) = tokens.next() {
             match token {
                 Gtoken::Symbol(b":") => {
-                    let name = tokens.next().expect("parse error: assignment");
-                    let t = self.top().unwrap().clone();
-                    self.vars.insert(name.lexeme().to_owned(), t);
+                    if let Some(name) = tokens.next() {
+                        if let Some(t) = self.top() {
+                            let a: Gval = t.clone().into();
+                            self.vars.insert(name.lexeme().to_owned(), a);
+                        }
+                    }
                 }
                 t => {
                     self.run_token(t);
@@ -83,13 +90,8 @@ impl Gs {
         self.stack.push(val)
     }
 
-    fn top(&self) -> Option<&Gval> {
-        if let Some(a) = self.stack.last() {
-            Some(a)
-        } else {
-            self.stable = false;
-            None
-        }
+    fn top(&mut self) -> Option<&Gval> {
+        self.stack.last()
     }
 
     fn dup(&mut self) {
@@ -97,8 +99,8 @@ impl Gs {
             self.push(a.clone());
             self.push(a);
         } else {
-            self.push(Gval::Arr(Vec::<Gval>::new()))
-            self.push(Gval::Arr(Vec::<Gval>::new()))
+            self.push(Gval::Arr(Vec::<Gval>::new()));
+            self.push(Gval::Arr(Vec::<Gval>::new()));
         }
     }
 
@@ -110,10 +112,11 @@ impl Gs {
                 self.lb[i] -= 1;
             }
         }
-        if let Some(a) = self.stack.pop() {
-            Some(a)
+        let a = self.stack.pop();
+        if a.is_some() {
+            a
         } else {
-            self.stable = false;
+            self.set_unstable();
             None
         }
     }
@@ -132,7 +135,7 @@ impl Gs {
         if let Some(bs) = self.pop() {
             self.push(Gval::Str(bs.inspect()));
         } else {
-            self.push(Gval::Str(Vec::<Gval>::new()));
+            self.push(Gval::Str(Vec::<u8>::new()));
         }
     }
 
@@ -158,7 +161,7 @@ impl Gs {
                 self.push(Gval::Arr(Vec::<Gval>::new()));
                 return;
             }
-            Self.push(Gval::Arr(Vec::<Gval>::new()));
+            self.push(Gval::Arr(Vec::<Gval>::new()));
             self.push(c);
             self.push(Gval::Arr(Vec::<Gval>::new()));
             return;
@@ -225,14 +228,14 @@ impl Gs {
     }
 
     fn plus(&mut self) {
-        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
-        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let b = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
+        let a = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
         self.push(a.plus(b));
     }
 
     fn minus(&mut self) {
-        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
-        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let b = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
+        let a = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
         match coerce(a, b) {
             Coerced::Ints(x, y) => self.push(Gval::Int(x - y)),
             Coerced::Arrs(x, y) => self.push(Gval::Arr(set_subtract(x, y))),
@@ -242,8 +245,8 @@ impl Gs {
     }
 
     fn asterisk(&mut self) {
-        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
-        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let b = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
+        let a = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
         use Gval::*;
         match (a, b) {
             // multiply
@@ -275,22 +278,40 @@ impl Gs {
     }
 
     fn slash(&mut self) {
-        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
-        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let b = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
+        let a = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
         use Gval::*;
         match (a, b) {
             // divide
-            (Int(a), Int(b)) => self.push(Int(a.div_floor(&b))),
+            (Int(a), Int(b)) => {
+                if b == BigInt::zero() {
+                    self.push(Int(BigInt::zero()));
+                    return;
+                }
+                self.push(Int(a.div_floor(&b)))
+            }
             // split
             (Arr(a), Arr(sep)) => {
+                if sep.len() == 0 {
+                    self.push(Arr(a));
+                    return;
+                }
                 let s = split(a, sep, false);
                 self.push(Arr(s.into_iter().map(|x| Arr(x)).collect()));
             }
             (Str(a), Str(sep)) => {
+                if sep.len() == 0 {
+                    self.push(Str(a));
+                    return;
+                }
                 let s = split(a, sep, false);
                 self.push(Arr(s.into_iter().map(|x| Str(x)).collect()));
             }
             (Arr(a), Str(sep)) | (Str(sep), Arr(a)) => {
+                if sep.len() == 0 {
+                    self.push(Arr(a));
+                    return;
+                }
                 let s = split(a, sep.into_iter().map(|x| x.into()).collect(), false);
                 self.push(Arr(s.into_iter().map(|x| Arr(x)).collect()));
             }
@@ -301,10 +322,18 @@ impl Gs {
 
             // chunk
             (Int(n), Arr(mut a)) | (Arr(mut a), Int(n)) => {
+                if n == BigInt::zero() {
+                    self.push(Arr(a));
+                    return;
+                }
                 let c = chunk(&mut a, n);
                 self.push(Arr(c.into_iter().map(|x| Arr(x.to_owned())).collect()));
             }
             (Int(n), Str(mut a)) | (Str(mut a), Int(n)) => {
+                if n == BigInt::zero() {
+                    self.push(Str(a));
+                    return;
+                }
                 let c = chunk(&mut a, n);
                 self.push(Arr(c.into_iter().map(|x| Str(x.to_owned())).collect()));
             }
@@ -313,8 +342,9 @@ impl Gs {
             (Blk(cond), Blk(step)) => {
                 let mut r = vec![];
                 loop {
-                    if let Some(a) = self.top() {
-                        self.push(a.clone());
+                    if let Some(t) = self.top() {
+                        let a:Gval = t.clone().into();
+                        self.push(a);
                     } else {
                         self.push(Gval::Arr(Vec::<Gval>::new()));
                     }
@@ -348,22 +378,40 @@ impl Gs {
     }
 
     fn percent(&mut self) {
-        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
-        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let b = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
+        let a = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
         use Gval::*;
         match (a, b) {
             // modulo
-            (Int(a), Int(b)) => self.push(Int(a.mod_floor(&b))),
+            (Int(a), Int(b)) => {
+                if b == BigInt::zero() {
+                    self.push(Int(BigInt::zero()));
+                    return;
+                }
+                self.push(Int(a.mod_floor(&b)));
+            }
             // clean split
             (Arr(a), Arr(sep)) => {
+                if sep.len() == 0 {
+                    self.push(Arr(a));
+                    return;
+                }
                 let s = split(a, sep, true);
                 self.push(Arr(s.into_iter().map(|x| Arr(x)).collect()));
             }
             (Str(a), Str(sep)) => {
+                if sep.len() == 0 {
+                    self.push(Str(a));
+                    return;
+                }
                 let s = split(a, sep, true);
                 self.push(Arr(s.into_iter().map(|x| Str(x)).collect()));
             }
             (Arr(a), Str(sep)) | (Str(sep), Arr(a)) => {
+                if sep.len() == 0 {
+                    self.push(Arr(a));
+                    return;
+                }
                 let s = split(a, sep.into_iter().map(|x| x.into()).collect(), true);
                 self.push(Arr(s.into_iter().map(|x| Arr(x)).collect()));
             }
@@ -379,8 +427,20 @@ impl Gs {
             }
 
             // every nth
-            (Int(n), Arr(a)) | (Arr(a), Int(n)) => self.push(Arr(every_nth(a, n))),
-            (Int(n), Str(a)) | (Str(a), Int(n)) => self.push(Str(every_nth(a, n))),
+            (Int(n), Arr(a)) | (Arr(a), Int(n)) => {
+                if n == BigInt::zero() {
+                    self.push(Arr(a));
+                    return;
+                }
+                self.push(Arr(every_nth(a, n)));
+            }
+            (Int(n), Str(a)) | (Str(a), Int(n)) => {
+                if n == BigInt::zero() {
+                    self.push(Str(a));
+                    return;
+                }
+                self.push(Str(every_nth(a, n)));
+            }
 
             // unimplemented
             (Int(n), Blk(code)) | (Blk(code), Int(n)) => {
@@ -388,16 +448,16 @@ impl Gs {
                 r = self.gs_map(code, r);
                 self.push(Arr(r));
             }
-            (Blk(codeA), Blk(codeB)) => {
-                let r = self.gs_map(codeB, vec![Gval::Blk(codeA)]);
+            (Blk(code_a), Blk(code_b)) => {
+                let r = self.gs_map(code_b, vec![Gval::Blk(code_a)]);
                 self.push(Arr(r));
             }
         }
     }
 
     fn vertical_bar(&mut self) {
-        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
-        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let b = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
+        let a = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
         self.push(match coerce(a, b) {
             Coerced::Ints(x, y) => Gval::Int(x | y),
             Coerced::Arrs(x, y) => Gval::Arr(set_or(x, y)),
@@ -407,8 +467,8 @@ impl Gs {
     }
 
     fn ampersand(&mut self) {
-        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
-        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let b = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
+        let a = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
         self.push(match coerce(a, b) {
             Coerced::Ints(x, y) => Gval::Int(x & y),
             Coerced::Arrs(x, y) => Gval::Arr(set_and(x, y)),
@@ -418,8 +478,8 @@ impl Gs {
     }
 
     fn caret(&mut self) {
-        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
-        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let b = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
+        let a = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
         self.push(match coerce(a, b) {
             Coerced::Ints(x, y) => Gval::Int(x ^ y),
             Coerced::Arrs(x, y) => Gval::Arr(set_xor(x, y)),
@@ -429,8 +489,8 @@ impl Gs {
     }
 
     fn lteqgt(&mut self, ordering: Ordering) {
-        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
-        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let b = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
+        let a = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
         use Gval::*;
         use Ordering::*;
         match (ordering, a, b) {
@@ -559,20 +619,25 @@ impl Gs {
         match self.pop() {
             Some(Int(n)) => self.push(Int(n + 1i32)),
             Some(Arr(mut a)) => {
-                // may cause a panic
-                let l = a.pop().unwrap();
-                self.push(Arr(a.to_vec()));
-                self.push(l);
+                if a.len() > 0 {
+                    let l = a.pop().unwrap();
+                    self.push(Arr(a.to_vec()));
+                    self.push(l);
+                }
             }
             Some(Str(mut a)) => {
-                let l = a.pop().unwrap();
-                self.push(Str(a.to_vec()));
-                self.push(l.into());
+                if a.len() > 0 {
+                    let l = a.pop().unwrap();
+                    self.push(Str(a.to_vec()));
+                    self.push(l.into());
+                }
             }
             Some(Blk(mut a)) => {
-                let l = a.pop().unwrap();
-                self.push(Blk(a.to_vec()));
-                self.push(l.into());
+                if a.len() > 0 {
+                    let l = a.pop().unwrap();
+                    self.push(Blk(a.to_vec()));
+                    self.push(l.into());
+                }
             }
             None => {
                 let n:BigInt = BigInt::zero();
@@ -612,8 +677,8 @@ impl Gs {
     }
 
     fn while_loop(&mut self, which: bool) {
-        let Some(b) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
-        let Some(a) = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new())));
+        let b = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
+        let a = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
         loop {
             self.go(a.clone());
             if let Some(f) = self.pop() {
@@ -809,7 +874,7 @@ impl Gs {
                 let b = self.pop().or(Some(Gval::bool(false))).unwrap();
                 let a = self.pop().or(Some(Gval::bool(false))).unwrap();
                 // run a if a and not b run b if b and not a
-                self.go(if a.truthy() && b.falsey() { a } else { if a.falsy() && b.truthy() { b } else { Gval::bool(false) } });
+                self.go(if a.truthy() && b.falsey() { a } else { if a.falsey() && b.truthy() { b } else { Gval::bool(false) } });
             }
             Gtoken::Symbol(b"n") => self.push(Gval::Str(b"\n".to_vec())),
             Gtoken::Symbol(b"print") => {
@@ -873,7 +938,7 @@ impl Gs {
             match token {
                 Gtoken::Symbol(b":") => {
                     let name = tokens.next().expect("parse error: assignment");
-                    let t = self.top().clone();
+                    let t = self.top().unwrap().clone();
                     self.vars.insert(name.lexeme().to_owned(), t);
                 }
                 t => {
@@ -886,7 +951,7 @@ impl Gs {
 
 pub fn golfscript(input:String,source:String) -> String {
     //convert input to vec of byte and pass to Gval::Str
-    let input = Gval::Str(input.as_bytes().to_vec());
+    let input = Gval::Str(input.into_bytes());
     //convert source to vec of bytes
     let source = source.as_bytes().to_vec();
     let mut gs = Gs::new();
