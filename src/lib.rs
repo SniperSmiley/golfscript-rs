@@ -17,6 +17,7 @@ use num::Zero;
 use std::cmp::Ordering;
 use std::io::Read;
 use std::io::Write;
+use std::f64;
 
 use std::collections::HashMap;
 
@@ -39,6 +40,7 @@ struct Gs {
     rng_state: u64,
     stable: bool,
     output: String,
+    max_loops: u64,
 }
 
 impl Gs {
@@ -50,11 +52,16 @@ impl Gs {
             rng_state: 123456789u64,
             stable: true,
             output: String::new(),
+            max_loops: u64::MAX,
         }
     }
 
     pub fn set_unstable(&mut self) {
         self.stable = false;
+    }
+
+    pub fn set_max_loops(&mut self,loops:u64) {
+        self.max_loops = loops;
     }
 
     pub fn print(&mut self,bytes: &[u8]) {
@@ -106,7 +113,9 @@ impl Gs {
 
     fn pop(&mut self) -> Option<Gval> {
         let mut i = self.lb.len();
-        while i > 0 && self.lb[i - 1] >= self.stack.len() {
+        let mut loops = 0u64;
+        while i > 0 && self.lb[i - 1] >= self.stack.len() && loops < self.max_loops {
+            loops += 1;
             i -= 1;
             if self.lb[i] > 0 {
                 self.lb[i] -= 1;
@@ -269,7 +278,9 @@ impl Gs {
 
             // times
             (Int(mut n), Blk(f)) | (Blk(f), Int(mut n)) => {
-                while n.is_positive() {
+                let mut loops = 0u64;
+                while n.is_positive() && loops < self.max_loops {
+                    loops += 1;
                     self.run(&f);
                     n -= 1;
                 }
@@ -341,7 +352,10 @@ impl Gs {
             // unfold
             (Blk(cond), Blk(step)) => {
                 let mut r = vec![];
+                let mut loops=0u64;
                 loop {
+                    if loops>=self.max_loops{break;}
+                    loops+=1u64;
                     if let Some(t) = self.top() {
                         let a:Gval = t.clone().into();
                         self.push(a);
@@ -516,7 +530,9 @@ impl Gs {
             Some(Int(n)) => {
                 let mut r = vec![];
                 let mut i = BigInt::zero();
-                while i < n {
+                let mut loops = 0u64;
+                while i < n && loops < self.max_loops {
+                    loops+=1;
                     r.push(Int(i.clone()));
                     i += 1i32;
                 }
@@ -555,7 +571,7 @@ impl Gs {
         match (a, b) {
             // power
             (Int(a), Int(b)) => self.push(Int(match b.to_u32() {
-                Some(e) => a.pow(e),
+                Some(e) => if f64::log(f64::from(a.to_i32().unwrap()),10.0)*f64::from(e)<100.0{a.pow(e)}else{a},
                 None => BigInt::zero(),
             })),
 
@@ -663,7 +679,10 @@ impl Gs {
 
     fn do_loop(&mut self) {
         if let Some(a) = self.pop() {
+            let mut loops = 0u64;
             loop {
+                if loops>=self.max_loops{break;}
+                loops+=1u64;
                 self.go(a.clone());
                 if let Some(f) = self.pop() {
                     if f.falsey() {
@@ -679,7 +698,10 @@ impl Gs {
     fn while_loop(&mut self, which: bool) {
         let b = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
         let a = self.pop().or(Some(Gval::Arr(Vec::<Gval>::new()))).unwrap();
+        let mut loops = 0u64;
         loop {
+            if loops>=self.max_loops{break;}
+            loops+=1u64;
             self.go(a.clone());
             if let Some(f) = self.pop() {
                 if  f.falsey() == which {
@@ -701,7 +723,9 @@ impl Gs {
         let blank = a.first().map_or(Gval::Arr(vec![]), |x| x.factory());
         for row in a {
             for (y, elem) in row.as_arr().into_iter().enumerate() {
-                while r.len() < y + 1 {
+                let mut loops = 0u64;
+                while r.len() < y + 1 && loops < self.max_loops {
+                    loops+=1;
                     r.push(blank.clone())
                 }
                 r[y].push(elem.clone());
@@ -717,7 +741,9 @@ impl Gs {
             Some(Gval::Int(n)) => {
                 let mut digits = vec![];
                 let mut i = n.abs();
-                while !i.is_zero() {
+                let mut loops = 0u64;
+                while !i.is_zero() && loops < self.max_loops {
+                    loops+=1;
                     let (j, k) = i.div_mod_floor(&b);
                     i = j;
                     digits.push(Gval::Int(k));
@@ -955,7 +981,7 @@ pub fn golfscript(input:String,source:String) -> String {
     //convert source to vec of bytes
     let source = source.as_bytes().to_vec();
     let mut gs = Gs::new();
-    
+    gs.set_max_loops(2000);
     gs.stack.push(input);
     gs.run(&source);
 
